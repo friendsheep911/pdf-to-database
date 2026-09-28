@@ -63,6 +63,57 @@ def is_fragile_fragment(text):
     return not any(k in t for k in PRICE_KW + NAME_KW + SPEC_KW)
 
 
+# ---------------- 平行双表配对（防御 E）----------------
+def row_key(item):
+    """行身份（忽略价格与备注），用于判断两张表是否为同一批材料。"""
+    return (clean(item.get("name", "")), clean(item.get("spec", "")), clean(item.get("unit", "")))
+
+
+def pair_parallel_tables(tables):
+    """把「同页两个都带名称列的同结构表」按行索引合并为一行多地区。
+
+    场景：分栏排版 —— 上表=尖扎/同仁、下表=泽库/河南（两表都有"材料名称"列）。
+    只按"B 页无名称列"配对的 A/B 逻辑对它们不成立，若不处理会被章节合并顺序拼接，
+    表现为"表格有列但值为空 + 同一材料重复成两行"。
+
+    四要件（缺一会误吞）：
+      ① 行数相等
+      ② 逐行 (名称, 型号, 单位) 全同
+      ③ 地区列互不相交   ← 防吞"含税价格表+除税价格表"（两张税表地区列相同）
+      ④ 两侧均有价格行   ← 防吞被 kind 误判成材料表的取费/费率表（无价格）
+    返回合并后的新列表。用法：把同 region+kind 的相邻表传入，再交给章节合并。
+    """
+    drop = set()
+    out = [dict(t, items=list(t["items"]), areas=list(t["areas"])) for t in tables]
+    for i, a in enumerate(out):
+        if i in drop:
+            continue
+        for j in range(i + 1, len(out)):
+            if j in drop:
+                continue
+            b = out[j]
+            if not a["items"] or len(a["items"]) != len(b["items"]):        # ①
+                continue
+            if set(a["areas"]) & set(b["areas"]):                           # ③
+                continue
+            if not any(x["prices"] for x in a["items"]) or \
+                    not any(x["prices"] for x in b["items"]):               # ④
+                continue
+            if [row_key(x) for x in a["items"]] != [row_key(x) for x in b["items"]]:   # ②
+                continue
+            for x, y in zip(a["items"], b["items"]):                        # 按行并地区
+                have = {p["area"] for p in x["prices"]}
+                x["prices"].extend(p for p in y["prices"] if p["area"] not in have)
+                if y.get("note") and not x.get("note"):
+                    x["note"] = y["note"]
+            for am in b["areas"]:
+                if am not in a["areas"]:
+                    a["areas"].append(am)
+            drop.add(j)
+            break
+    return [t for k, t in enumerate(out) if k not in drop]
+
+
 def build_line_groups(page, tb):
     """把页面 words 按 (block,line) 聚成印刷行；返回 [(y, x0, text)]。
     注意：同一印刷行的多个词会粘连（'350.00' + '350(茶卡398)'），
